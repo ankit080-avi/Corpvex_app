@@ -13,9 +13,9 @@
 /* ═══ CONFIG — fill these after creating your Supabase project ═══════════════ */
 const CONFIG = {
   // Project URL, e.g. https://abcdefgh.supabase.co
-  SUPABASE_URL: 'https://YOUR-PROJECT.supabase.co',
+  SUPABASE_URL: 'https://dhqiwizjluiigztohghz.supabase.co',
   // Publishable / anon key (safe for the client; only used for device_tokens).
-  SUPABASE_ANON_KEY: 'YOUR_PUBLISHABLE_ANON_KEY',
+  SUPABASE_ANON_KEY: 'sb_publishable_gKT7nebaff4p880B6HFLGg_MLBovcJC',
   POLL_MS: 3000,          // how often to poll for a live OTP
   ALLOW_REGISTER: true,   // show the "Pair a device" tab (needs ALLOW_SELF_REGISTER=1 on the function)
 };
