@@ -1,0 +1,12 @@
+{
+  "name": "corpvex-capacitor",
+  "version": "1.0.0",
+  "description": "Corpvex Authenticator APK shell",
+  "type": "commonjs",
+  "license": "ISC",
+  "dependencies": {
+    "@capacitor/android": "^8.3.1",
+    "@capacitor/cli": "^8.3.1",
+    "@capacitor/core": "^8.3.1"
+  }
+}

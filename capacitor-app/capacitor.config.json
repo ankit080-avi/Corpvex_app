@@ -1,0 +1,8 @@
+{
+  "appId": "com.corpvex.app",
+  "appName": "Corpvex",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#0b1020"
+  }
+}

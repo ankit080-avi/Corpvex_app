@@ -1,0 +1,10 @@
+# Supabase project config (functions only).
+# Both functions are called with bare URLs (ERP GET, app POST) so JWT
+# enforcement is turned off here. If you use the dashboard instead of the CLI,
+# toggle "Enforce JWT" off for each function under Edge Functions.
+
+[functions.otp-api]
+verify_jwt = false
+
+[functions.send-push]
+verify_jwt = false
