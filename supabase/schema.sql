@@ -19,19 +19,31 @@
 -- ============================================================================
 
 -- ── app_users ───────────────────────────────────────────────────────────────
--- One row per Corpvex ERP user that has paired the authenticator app.
---   id        = the Corpvex ERP login id (the `user` the ERP passes)
---   pass_hash = sha-256 hex of the app password (computed in the edge function)
---   poll_key  = per-user secret the app stores after login; required to read OTPs
+-- One row per Corpvex ERP user that can use the authenticator app.
+--   id          = the Corpvex ERP login id (the `user` the ERP passes)
+--   pass_hash   = sha-256 hex of the app password (computed in the edge function)
+--   poll_key    = per-user secret the app stores after login; required to read OTPs
+--                 (also doubles as the bearer token for admin actions)
+--   role        = 'admin' (the software admin, id = ADMIN_ID secret) or 'user'
+--   otp_enabled = admin switch: when false, `paired` returns false so the ERP
+--                 skips app-OTP for that user (i.e. "disable OTP for this user")
+-- Accounts are created by the admin (admin_upsert_user); normal self-signup is off.
+-- The admin bootstraps their own password once via the register action (the id
+-- matching ADMIN_ID is auto-granted role='admin').
 create table if not exists public.app_users (
-  id         text primary key,
-  name       text,
-  mobile     text,
-  pass_hash  text,
-  poll_key   text,
-  is_active  boolean default true,
-  created_at timestamptz default now()
+  id          text primary key,
+  name        text,
+  mobile      text,
+  pass_hash   text,
+  poll_key    text,
+  role        text default 'user',
+  is_active   boolean default true,
+  otp_enabled boolean default true,
+  created_at  timestamptz default now()
 );
+-- (re-runnable) add the new columns if an older app_users already exists
+alter table public.app_users add column if not exists role        text default 'user';
+alter table public.app_users add column if not exists otp_enabled boolean default true;
 alter table public.app_users enable row level security;
 -- No anon policy => the publishable key cannot read/write this table at all.
 -- (The otp-api Edge Function uses the service-role key and bypasses RLS.)

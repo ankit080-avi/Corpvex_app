@@ -31,6 +31,9 @@ const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const PEPPER = Deno.env.get('OTP_PEPPER') ?? 'corpvex';
 const ERP_API_KEY = Deno.env.get('ERP_API_KEY') ?? '';
 const ALLOW_SELF_REGISTER = (Deno.env.get('ALLOW_SELF_REGISTER') ?? '0') === '1';
+// The software admin's id (full control over app-login users). Defaults to the
+// number you gave; override with the ADMIN_ID secret.
+const ADMIN_ID = (Deno.env.get('ADMIN_ID') ?? '88858141463').trim();
 
 const DEFAULT_TTL = 120; // seconds the relayed code stays readable by the app
 
@@ -72,6 +75,14 @@ async function readParams(req: Request): Promise<Record<string, string>> {
   return out;
 }
 
+// Resolve an admin from their poll_key (which doubles as the admin bearer token).
+async function requireAdmin(adminKey: string) {
+  if (!adminKey) return null;
+  const { data } = await db.from('app_users')
+    .select('id,role,is_active').eq('poll_key', adminKey).maybeSingle();
+  return data && data.role === 'admin' && data.is_active ? data : null;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
 
@@ -80,31 +91,40 @@ Deno.serve(async (req) => {
   const user = (p.user || '').trim();
 
   try {
-    // ── register / pair an app user ──────────────────────────────────────────
+    // ── register: admin first-time setup (or self-signup if explicitly allowed) ─
     if (action === 'register') {
-      if (!ALLOW_SELF_REGISTER) return json({ ok: false, error: 'registration disabled' }, 403);
+      const isAdminId = !!user && user === ADMIN_ID;
+      if (!isAdminId && !ALLOW_SELF_REGISTER) {
+        return json({ ok: false, error: 'registration disabled — ask the admin to create your account' }, 403);
+      }
       if (!user || !p.p) return json({ ok: false, error: 'user and p required' }, 400);
-      const pollKey = crypto.randomUUID();
+      const { data: existing } = await db.from('app_users').select('id,role').eq('id', user).maybeSingle();
+      if (isAdminId && existing && existing.role === 'admin') {
+        return json({ ok: false, error: 'admin already set up — sign in instead' }, 409);
+      }
       const row = {
         id: user,
         name: p.name || user,
         mobile: p.mobile || null,
         pass_hash: await hashPass(p.p),
-        poll_key: pollKey,
+        poll_key: crypto.randomUUID(),
+        role: isAdminId ? 'admin' : 'user',
         is_active: true,
+        otp_enabled: true,
       };
       const { error } = await db.from('app_users').upsert(row, { onConflict: 'id' });
       if (error) return json({ ok: false, error: error.message }, 500);
-      return json({ ok: true, name: row.name, pollKey });
+      return json({ ok: true, name: row.name, pollKey: row.poll_key, role: row.role });
     }
 
-    // ── login (verify the app password, hand back the poll key) ──────────────
+    // ── login (verify the app password, hand back the poll key + role) ───────
     if (action === 'login') {
       if (!user || !p.p) return json({ ok: false, error: 'user and p required' }, 400);
       const { data: u } = await db.from('app_users').select('*').eq('id', user).maybeSingle();
-      if (!u || !u.is_active) return json({ ok: false, error: 'no such user' }, 404);
+      if (!u) return json({ ok: false, error: 'no such user' }, 404);
+      if (!u.is_active) return json({ ok: false, error: 'account disabled — contact the admin' }, 403);
       if (u.pass_hash !== (await hashPass(p.p))) return json({ ok: false, error: 'wrong password' }, 401);
-      return json({ ok: true, name: u.name, pollKey: u.poll_key });
+      return json({ ok: true, name: u.name, pollKey: u.poll_key, role: u.role || 'user', otpEnabled: u.otp_enabled !== false });
     }
 
     // ── send: ERP relays an OTP it generated (+ stored in its own users table) ─
@@ -150,11 +170,68 @@ Deno.serve(async (req) => {
       return json({ ok: true, code: c.code, expiresAt: c.expires_at, remaining });
     }
 
-    // ── paired: ERP asks whether a user has linked the app (drives 2FA gating) ─
+    // ── paired: ERP asks whether to require app-OTP for this user ────────────
+    // True only if the account is active AND the admin hasn't disabled OTP for it.
     if (action === 'paired') {
       if (!user) return json({ ok: false, error: 'user required' }, 400);
-      const { data: u } = await db.from('app_users').select('id,is_active').eq('id', user).maybeSingle();
-      return json({ ok: true, paired: !!(u && u.is_active) });
+      const { data: u } = await db.from('app_users').select('id,is_active,otp_enabled').eq('id', user).maybeSingle();
+      return json({ ok: true, paired: !!(u && u.is_active && u.otp_enabled !== false) });
+    }
+
+    // ── admin: full control over app-login users (gated by an admin poll_key) ─
+    if (action.startsWith('admin_')) {
+      const admin = await requireAdmin(p.adminkey || '');
+      if (!admin) return json({ ok: false, error: 'admin auth required' }, 401);
+      const target = (p.target || '').trim();
+
+      if (action === 'admin_list') {
+        const { data } = await db.from('app_users')
+          .select('id,name,mobile,role,is_active,otp_enabled,created_at')
+          .order('role', { ascending: true }).order('id', { ascending: true });
+        return json({ ok: true, users: data || [], adminId: ADMIN_ID });
+      }
+
+      if (action === 'admin_upsert_user') {
+        if (!target) return json({ ok: false, error: 'target user required' }, 400);
+        const { data: existing } = await db.from('app_users').select('id').eq('id', target).maybeSingle();
+        const row: Record<string, unknown> = { id: target, name: p.name || target, mobile: p.mobile || null };
+        if (!existing) { row.poll_key = crypto.randomUUID(); row.role = 'user'; row.is_active = true; row.otp_enabled = true; }
+        if (p.p) row.pass_hash = await hashPass(p.p);
+        if (!existing && !p.p) return json({ ok: false, error: 'a password is required for a new user' }, 400);
+        const { error } = await db.from('app_users').upsert(row, { onConflict: 'id' });
+        if (error) return json({ ok: false, error: error.message }, 500);
+        return json({ ok: true, created: !existing });
+      }
+
+      if (action === 'admin_set_flags') {
+        if (!target) return json({ ok: false, error: 'target user required' }, 400);
+        if (target === ADMIN_ID) return json({ ok: false, error: 'cannot change the admin account' }, 400);
+        const patch: Record<string, unknown> = {};
+        if (p.is_active !== undefined) patch.is_active = ['true', '1'].includes(String(p.is_active));
+        if (p.otp_enabled !== undefined) patch.otp_enabled = ['true', '1'].includes(String(p.otp_enabled));
+        if (!Object.keys(patch).length) return json({ ok: false, error: 'nothing to update' }, 400);
+        const { error } = await db.from('app_users').update(patch).eq('id', target);
+        if (error) return json({ ok: false, error: error.message }, 500);
+        return json({ ok: true });
+      }
+
+      if (action === 'admin_reset_password') {
+        if (!target || !p.p) return json({ ok: false, error: 'target and p required' }, 400);
+        const { error } = await db.from('app_users')
+          .update({ pass_hash: await hashPass(p.p), poll_key: crypto.randomUUID() }).eq('id', target);
+        if (error) return json({ ok: false, error: error.message }, 500);
+        return json({ ok: true });
+      }
+
+      if (action === 'admin_delete_user') {
+        if (!target) return json({ ok: false, error: 'target required' }, 400);
+        if (target === ADMIN_ID) return json({ ok: false, error: 'cannot delete the admin' }, 400);
+        await db.from('app_users').delete().eq('id', target);
+        await db.from('otp_codes').delete().eq('user_id', target);
+        return json({ ok: true });
+      }
+
+      return json({ ok: false, error: `unknown admin action '${action}'` }, 400);
     }
 
     return json({ ok: false, error: `unknown action '${action}'` }, 400);

@@ -57,21 +57,28 @@ function toast(msg, kind = 'info') {
 
 /* ═══ API ════════════════════════════════════════════════════════════════════ */
 async function api(action, params = {}, method = 'GET') {
-  let res;
-  if (method === 'POST') {
-    res = await fetch(OTP_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, ...params }),
-    });
-  } else {
-    const q = new URLSearchParams({ action, ...params });
-    res = await fetch(`${OTP_API}?${q}`);
+  try {
+    let res;
+    if (method === 'POST') {
+      res = await fetch(OTP_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...params }),
+      });
+    } else {
+      const q = new URLSearchParams({ action, ...params });
+      res = await fetch(`${OTP_API}?${q}`);
+    }
+    let data = {};
+    try { data = await res.json(); } catch { /* ignore */ }
+    return { status: res.status, ...data };
+  } catch {
+    return { status: 0, ok: false, error: 'Network error — check connection / config' };
   }
-  let data = {};
-  try { data = await res.json(); } catch { /* ignore */ }
-  return { status: res.status, ...data };
 }
+
+// Admin actions always carry the admin's pollKey as the bearer token.
+const adminApi = (action, params = {}) => api(action, { adminKey: session.pollKey, ...params }, 'POST');
 
 /* ═══ Auth screens ═══════════════════════════════════════════════════════════ */
 function viewAuth() {
@@ -87,10 +94,10 @@ function viewAuth() {
           el('div', { class: 'brand-sub' }, 'Authenticator'),
         ),
       ),
-      el('h1', { class: 'auth-title' }, isReg ? 'Pair this device' : 'Sign in'),
+      el('h1', { class: 'auth-title' }, isReg ? 'Admin setup' : 'Sign in'),
       el('p', { class: 'auth-lead' }, isReg
-        ? 'Link your phone to your Corpvex ERP login so you can receive OTPs here.'
-        : 'Enter your Corpvex ERP login to start receiving OTPs on this device.'),
+        ? 'First-time setup for the software admin. Regular users sign in with the credentials the admin creates for them.'
+        : 'Sign in with your Corpvex app credentials to receive login OTPs here.'),
 
       el('label', { class: 'field' }, el('span', {}, 'User ID'),
         el('input', { class: 'input', id: 'f-user', autocomplete: 'username', placeholder: 'your ERP user id', value: session?.id || '', required: true })),
@@ -103,11 +110,11 @@ function viewAuth() {
       el('label', { class: 'field' }, el('span', {}, isReg ? 'Set a password' : 'Password'),
         el('input', { class: 'input', id: 'f-pass', type: 'password', autocomplete: isReg ? 'new-password' : 'current-password', placeholder: '••••••••', required: true })),
 
-      el('button', { class: 'btn btn-primary', type: 'submit', id: 'f-submit' }, isReg ? 'Pair device' : 'Sign in'),
+      el('button', { class: 'btn btn-primary', type: 'submit', id: 'f-submit' }, isReg ? 'Create admin' : 'Sign in'),
 
       CONFIG.ALLOW_REGISTER && el('button', { class: 'btn btn-ghost', type: 'button',
         onclick: () => { mode = isReg ? 'login' : 'register'; render(); } },
-        isReg ? '← Back to sign in' : 'First time? Pair this device'),
+        isReg ? '← Back to sign in' : 'Admin first-time setup'),
 
       el('div', { class: 'build-tag' }, `Corpvex Authenticator · build ${BUILD}`),
     );
@@ -128,20 +135,20 @@ function viewAuth() {
         const name = document.getElementById('f-name').value.trim();
         const mobile = document.getElementById('f-mobile').value.trim();
         const r = await api('register', { user, p: pass, name, mobile }, 'POST');
-        if (!r.ok) throw new Error(r.error || 'Could not pair');
-        session = { id: user, name: r.name || name || user, pollKey: r.pollKey };
+        if (!r.ok) throw new Error(r.error || 'Setup failed');
+        session = { id: user, name: r.name || name || user, pollKey: r.pollKey, role: r.role || 'user' };
       } else {
         const r = await api('login', { user, p: pass }, 'POST');
         if (!r.ok) throw new Error(r.error || 'Sign in failed');
-        session = { id: user, name: r.name || user, pollKey: r.pollKey };
+        session = { id: user, name: r.name || user, pollKey: r.pollKey, role: r.role || 'user' };
       }
       saveSession(session);
       toast(`Welcome, ${session.name}`, 'success');
-      Push.register(session).catch(() => {});
+      if (session.role !== 'admin') Push.register(session).catch(() => {});
       route();
     } catch (err) {
       toast(err.message, 'error');
-      btn.disabled = false; btn.textContent = mode === 'register' ? 'Pair device' : 'Sign in';
+      btn.disabled = false; btn.textContent = mode === 'register' ? 'Create admin' : 'Sign in';
     }
   }
 
@@ -260,6 +267,107 @@ function logout() {
   route();
 }
 
+/* ═══ Admin dashboard (role === 'admin') ═════════════════════════════════════ */
+function viewAdmin() {
+  stopPolling();
+  const listHost = el('div', { class: 'admin-list', id: 'admin-list' }, el('div', { class: 'muted' }, 'Loading…'));
+
+  const addForm = el('form', { class: 'card admin-add', onsubmit: onAdd },
+    el('div', { class: 'admin-add-title' }, 'Add user'),
+    el('div', { class: 'admin-add-grid' },
+      el('input', { class: 'input', id: 'a-id', placeholder: 'User ID (ERP login)', autocomplete: 'off', required: true }),
+      el('input', { class: 'input', id: 'a-name', placeholder: 'Name', autocomplete: 'off' }),
+      el('input', { class: 'input', id: 'a-mobile', placeholder: 'Mobile (optional)', inputmode: 'numeric', autocomplete: 'off' }),
+      el('input', { class: 'input', id: 'a-pass', type: 'password', placeholder: 'Password', autocomplete: 'new-password', required: true }),
+    ),
+    el('button', { class: 'btn btn-primary', type: 'submit' }, 'Create user'),
+  );
+
+  $view().replaceChildren(el('div', { class: 'otp-screen' },
+    el('div', { class: 'topbar' },
+      el('div', { class: 'topbar-id' }, el('span', { class: 'dot' }), el('span', {}, 'Admin · ' + (session.name || session.id))),
+      el('button', { class: 'btn btn-ghost btn-sm', onclick: logout }, 'Sign out'),
+    ),
+    addForm,
+    el('div', { class: 'admin-head' },
+      el('span', {}, 'Users'),
+      el('button', { class: 'btn btn-ghost btn-sm', onclick: refresh }, '↻ Refresh')),
+    listHost,
+  ));
+  refresh();
+
+  function val(id) { const e = document.getElementById(id); return e ? e.value.trim() : ''; }
+
+  async function refresh() {
+    if (configMissing(true)) return listHost.replaceChildren(el('div', { class: 'muted' }, 'Set SUPABASE_URL / key in app.js first.'));
+    listHost.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
+    const r = await adminApi('admin_list');
+    if (r.status === 401) { toast('Admin session expired', 'error'); return logout(); }
+    if (!r.ok) return listHost.replaceChildren(el('div', { class: 'muted' }, r.error || 'Failed to load'));
+    if (!r.users || !r.users.length) return listHost.replaceChildren(el('div', { class: 'muted' }, 'No users yet — add one above.'));
+    listHost.replaceChildren(...r.users.map((u) => userRow(u, r.adminId)));
+  }
+
+  function userRow(u, adminId) {
+    const isAdmin = u.role === 'admin' || u.id === adminId;
+    const sub = el('div', { class: 'urow-sub' },
+      isAdmin ? el('span', { class: 'badge badge-admin' }, 'admin') : null,
+      el('span', { class: u.is_active ? 'badge badge-on' : 'badge badge-off' }, u.is_active ? 'active' : 'disabled'),
+      el('span', { class: u.otp_enabled ? 'badge badge-on' : 'badge badge-off' }, u.otp_enabled ? 'OTP on' : 'OTP off'),
+      u.mobile ? el('span', { class: 'muted' }, u.mobile) : null,
+    );
+    const actions = isAdmin
+      ? el('div', { class: 'urow-actions' }, el('span', { class: 'muted' }, 'protected'))
+      : el('div', { class: 'urow-actions' },
+          el('button', { class: 'btn btn-mini', onclick: () => setFlag(u, 'otp_enabled', !u.otp_enabled) }, u.otp_enabled ? 'Disable OTP' : 'Enable OTP'),
+          el('button', { class: 'btn btn-mini', onclick: () => setFlag(u, 'is_active', !u.is_active) }, u.is_active ? 'Disable' : 'Enable'),
+          el('button', { class: 'btn btn-mini', onclick: () => resetPw(u) }, 'Reset pw'),
+          el('button', { class: 'btn btn-mini btn-danger', onclick: () => delUser(u) }, 'Delete'),
+        );
+    return el('div', { class: 'urow' },
+      el('div', { class: 'urow-main' },
+        el('div', { class: 'urow-id' }, u.name || u.id),
+        el('div', { class: 'urow-name' }, u.id),
+        sub),
+      actions);
+  }
+
+  async function onAdd(e) {
+    e.preventDefault();
+    const id = val('a-id'), name = val('a-name'), mobile = val('a-mobile'), p = val('a-pass');
+    if (!id || !p) return toast('User ID and password are required', 'error');
+    if (configMissing()) return;
+    const r = await adminApi('admin_upsert_user', { target: id, name, mobile, p });
+    if (!r.ok) return toast(r.error || 'Failed', 'error');
+    toast(r.created ? `Created ${id}` : `Updated ${id}`, 'success');
+    ['a-id', 'a-name', 'a-mobile', 'a-pass'].forEach((i) => { const e2 = document.getElementById(i); if (e2) e2.value = ''; });
+    refresh();
+  }
+
+  async function setFlag(u, field, value) {
+    const r = await adminApi('admin_set_flags', { target: u.id, [field]: value });
+    if (!r.ok) return toast(r.error || 'Failed', 'error');
+    toast(field === 'otp_enabled' ? (value ? 'OTP enabled' : 'OTP disabled') : (value ? 'Account enabled' : 'Account disabled'), 'success');
+    refresh();
+  }
+
+  async function resetPw(u) {
+    const np = window.prompt(`New password for ${u.id}:`);
+    if (!np) return;
+    const r = await adminApi('admin_reset_password', { target: u.id, p: np });
+    if (!r.ok) return toast(r.error || 'Failed', 'error');
+    toast(`Password reset for ${u.id}`, 'success');
+  }
+
+  async function delUser(u) {
+    if (!window.confirm(`Delete ${u.id}? This removes their app login.`)) return;
+    const r = await adminApi('admin_delete_user', { target: u.id });
+    if (!r.ok) return toast(r.error || 'Failed', 'error');
+    toast(`Deleted ${u.id}`, 'success');
+    refresh();
+  }
+}
+
 /* ═══ Optional FCM push (wakes/notifies; code still arrives via poll) ═════════ */
 const Push = {
   _sb: null,
@@ -320,8 +428,10 @@ function configMissing(silent) {
 
 function route() {
   session = session || loadSession();
-  if (session && session.pollKey) viewHome();
-  else viewAuth();
+  if (session && session.pollKey) {
+    if (session.role === 'admin') viewAdmin();
+    else viewHome();
+  } else viewAuth();
 }
 
 // Re-poll immediately when the app comes back to the foreground.
