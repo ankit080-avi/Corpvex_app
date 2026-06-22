@@ -197,7 +197,9 @@ function viewHome() {
   startPolling();
 }
 
-let current = null; // { code, expiresAt }
+let current = null;          // { code, expiresAt }
+let successUntil = 0;        // show "Login successful" until this timestamp
+let awaitingConsume = false; // a code was displayed; waiting for the ERP to consume it
 
 async function poll() {
   if (!session) return;
@@ -207,6 +209,10 @@ async function poll() {
     if (r.httpStatus === 401) { toast('Session expired — sign in again', 'error'); return logout(); }
     if (r.ok && r.code) {
       if (!current || current.code !== r.code) current = { code: r.code, expiresAt: r.expiresAt };
+      awaitingConsume = true; successUntil = 0;
+    } else if (r.ok && r.consumed) {
+      current = null;
+      if (awaitingConsume) { successUntil = Date.now() + 6000; awaitingConsume = false; }
     } else if (r.ok && r.none) {
       current = null;
     }
@@ -222,12 +228,14 @@ function paintOtp() {
   const ringFill = document.getElementById('ring-fill');
   if (!codeEl) return;
 
+  const inSuccess = successUntil && Date.now() < successUntil;
+
   if (current) {
     const remaining = Math.max(0, Math.floor((new Date(current.expiresAt).getTime() - Date.now()) / 1000));
     if (remaining <= 0) { current = null; return paintOtp(); }
     const c = String(current.code);
     codeEl.textContent = `${c.slice(0, 3)} ${c.slice(3)}`;
-    codeEl.classList.add('live');
+    codeEl.className = 'otp-code live';
     statusEl.textContent = 'Enter this in the ERP';
     statusEl.className = 'otp-status live';
     copyBtn.disabled = false;
@@ -235,16 +243,25 @@ function paintOtp() {
     if (ringFill) {
       const pct = Math.min(100, Math.max(0, (remaining / 120) * 100));
       ringFill.style.setProperty('--pct', pct + '%');
-      ringFill.classList.toggle('low', remaining <= 15);
+      ringFill.className = 'ring-fill' + (remaining <= 15 ? ' low' : '');
     }
+  } else if (inSuccess) {
+    codeEl.textContent = '✓';
+    codeEl.className = 'otp-code done';
+    statusEl.textContent = 'Login successful';
+    statusEl.className = 'otp-status ok';
+    copyBtn.disabled = true;
+    if (ringNum) ringNum.textContent = '✓';
+    if (ringFill) { ringFill.style.setProperty('--pct', '100%'); ringFill.className = 'ring-fill done'; }
   } else {
+    if (successUntil) successUntil = 0;
     codeEl.textContent = '— — —';
-    codeEl.classList.remove('live');
+    codeEl.className = 'otp-code';
     statusEl.textContent = 'Waiting for a login request…';
     statusEl.className = 'otp-status';
     copyBtn.disabled = true;
     if (ringNum) ringNum.textContent = '';
-    if (ringFill) { ringFill.style.setProperty('--pct', '0%'); ringFill.classList.remove('low'); }
+    if (ringFill) { ringFill.style.setProperty('--pct', '0%'); ringFill.className = 'ring-fill'; }
   }
 }
 

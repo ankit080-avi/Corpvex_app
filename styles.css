@@ -119,6 +119,7 @@ body {
   user-select: all;
 }
 .otp-code.live { color: var(--text); }
+.otp-code.done { color: var(--good); letter-spacing: 0; }
 
 /* countdown ring */
 .ring {
@@ -135,10 +136,12 @@ body {
   transition: background .9s linear;
 }
 .ring-fill.low { background: conic-gradient(var(--bad) var(--pct), transparent 0); }
+.ring-fill.done { background: conic-gradient(var(--good) 100%, transparent 0); }
 .ring-num { font-family: var(--mono); font-weight: 700; font-size: 24px; color: var(--text); }
 
 .otp-status { font-size: 14px; color: var(--text-dim); margin-bottom: 20px; min-height: 20px; }
 .otp-status.live { color: var(--good); font-weight: 600; }
+.otp-status.ok { color: var(--good); font-weight: 700; }
 
 .otp-help { text-align: center; color: var(--text-dim); font-size: 13px; line-height: 1.55; margin-top: 22px; padding: 0 10px; }
 

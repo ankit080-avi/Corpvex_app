@@ -59,13 +59,15 @@ revoke all on public.app_users from anon, authenticated;
 -- Relay copy of the ERP-issued OTP. The ERP pushes a code via `action=send`;
 -- older unused codes for the user are superseded so only the newest is readable.
 create table if not exists public.otp_codes (
-  id         text primary key,
-  user_id    text not null,
-  code       text not null,
-  used       boolean default false,
-  created_at timestamptz default now(),
-  expires_at timestamptz not null
+  id          text primary key,
+  user_id     text not null,
+  code        text not null,
+  used        boolean default false,
+  created_at  timestamptz default now(),
+  expires_at  timestamptz not null,
+  consumed_at timestamptz   -- set when the ERP login succeeds (app shows "success")
 );
+alter table public.otp_codes add column if not exists consumed_at timestamptz;
 alter table public.otp_codes enable row level security;
 revoke all on public.otp_codes from anon, authenticated;
 create index if not exists otp_codes_user_idx    on public.otp_codes (user_id);
