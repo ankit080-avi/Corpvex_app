@@ -83,7 +83,8 @@ VAPID public key, and set the `FIREBASE_SERVICE_ACCOUNT` secret on the
 ## ERP integration
 
 The ERP generates + stores + verifies the OTP itself; it only calls **one** URL to
-relay the code (see [`erp_integration/corpvex_otp.py`](erp_integration/corpvex_otp.py)):
+relay the code. The helper for that lives in the **ERP** project (separate repo),
+at `corpvex_otp.py` — not in this repo. Usage:
 
 ```python
 from corpvex_otp import generate_otp, send_otp
@@ -98,9 +99,8 @@ send_otp("ankit", code)                     # 2) relay to the phone app
 #    SELECT otp, otp_expiry FROM users WHERE login_id = ?  (compare + check expiry)
 ```
 
-Point `OTP_API_BASE` (and `API_KEY`, if you set the `ERP_API_KEY` secret) in that
-module at your deployed function URL. This helper file belongs in the **ERP**
-project — it lives here only as reference.
+Set `OTP_API_BASE` (and `API_KEY`, if you set the `ERP_API_KEY` secret) in that
+module to your deployed function URL.
 
 ---
 
@@ -117,7 +117,8 @@ project — it lives here only as reference.
 | `supabase/functions/send-push/` | optional FCM fan-out on `notifications` insert |
 | `supabase/config.toml` | disables JWT enforcement on the functions |
 | `capacitor-app/` | Android wrapper + `build.ps1` (android/ & www/ are gitignored, regenerated) |
-| `erp_integration/corpvex_otp.py` | drop-in Python helper for the ERP login |
+
+> The ERP-side helper (`corpvex_otp.py`) lives in the **ERP** project, not here.
 
 ---
 
