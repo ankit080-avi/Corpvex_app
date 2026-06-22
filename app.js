@@ -305,25 +305,45 @@ function viewAdmin() {
     if (r.status === 401) { toast('Admin session expired', 'error'); return logout(); }
     if (!r.ok) return listHost.replaceChildren(el('div', { class: 'muted' }, r.error || 'Failed to load'));
     if (!r.users || !r.users.length) return listHost.replaceChildren(el('div', { class: 'muted' }, 'No users yet — add one above.'));
-    listHost.replaceChildren(...r.users.map((u) => userRow(u, r.adminId)));
+    const ord = { pending: 0, active: 1, rejected: 2 };
+    const users = r.users.slice().sort((a, b) => (ord[a.status] ?? 9) - (ord[b.status] ?? 9) || String(a.id).localeCompare(String(b.id)));
+    listHost.replaceChildren(...users.map((u) => userRow(u, r.adminId)));
+  }
+
+  function statusBadge(s) {
+    const cls = s === 'active' ? 'badge-on' : s === 'pending' ? 'badge-pending' : 'badge-off';
+    return el('span', { class: 'badge ' + cls }, s || 'pending');
   }
 
   function userRow(u, adminId) {
     const isAdmin = u.role === 'admin' || u.id === adminId;
     const sub = el('div', { class: 'urow-sub' },
-      isAdmin ? el('span', { class: 'badge badge-admin' }, 'admin') : null,
-      el('span', { class: u.is_active ? 'badge badge-on' : 'badge badge-off' }, u.is_active ? 'active' : 'disabled'),
-      el('span', { class: u.otp_enabled ? 'badge badge-on' : 'badge badge-off' }, u.otp_enabled ? 'OTP on' : 'OTP off'),
+      isAdmin ? el('span', { class: 'badge badge-admin' }, 'admin') : statusBadge(u.status),
+      (!isAdmin && u.status === 'active')
+        ? el('span', { class: u.otp_enabled ? 'badge badge-on' : 'badge badge-off' }, u.otp_enabled ? 'OTP on' : 'OTP off') : null,
       u.mobile ? el('span', { class: 'muted' }, u.mobile) : null,
     );
-    const actions = isAdmin
-      ? el('div', { class: 'urow-actions' }, el('span', { class: 'muted' }, 'protected'))
-      : el('div', { class: 'urow-actions' },
-          el('button', { class: 'btn btn-mini', onclick: () => setFlag(u, 'otp_enabled', !u.otp_enabled) }, u.otp_enabled ? 'Disable OTP' : 'Enable OTP'),
-          el('button', { class: 'btn btn-mini', onclick: () => setFlag(u, 'is_active', !u.is_active) }, u.is_active ? 'Disable' : 'Enable'),
-          el('button', { class: 'btn btn-mini', onclick: () => resetPw(u) }, 'Reset pw'),
-          el('button', { class: 'btn btn-mini btn-danger', onclick: () => delUser(u) }, 'Delete'),
-        );
+    let actions;
+    if (isAdmin) {
+      actions = el('div', { class: 'urow-actions' }, el('span', { class: 'muted' }, 'protected'));
+    } else if (u.status === 'pending') {
+      actions = el('div', { class: 'urow-actions' },
+        el('button', { class: 'btn btn-mini btn-approve', onclick: () => setStatus(u, 'active') }, 'Approve'),
+        el('button', { class: 'btn btn-mini btn-danger', onclick: () => setStatus(u, 'rejected') }, 'Reject'),
+      );
+    } else if (u.status === 'rejected') {
+      actions = el('div', { class: 'urow-actions' },
+        el('button', { class: 'btn btn-mini btn-approve', onclick: () => setStatus(u, 'active') }, 'Approve'),
+        el('button', { class: 'btn btn-mini btn-danger', onclick: () => delUser(u) }, 'Delete'),
+      );
+    } else {
+      actions = el('div', { class: 'urow-actions' },
+        el('button', { class: 'btn btn-mini', onclick: () => setFlag(u, 'otp_enabled', !u.otp_enabled) }, u.otp_enabled ? 'Disable OTP' : 'Enable OTP'),
+        el('button', { class: 'btn btn-mini', onclick: () => setStatus(u, 'rejected') }, 'Disable'),
+        el('button', { class: 'btn btn-mini', onclick: () => resetPw(u) }, 'Reset pw'),
+        el('button', { class: 'btn btn-mini btn-danger', onclick: () => delUser(u) }, 'Delete'),
+      );
+    }
     return el('div', { class: 'urow' },
       el('div', { class: 'urow-main' },
         el('div', { class: 'urow-id' }, u.name || u.id),
@@ -347,7 +367,15 @@ function viewAdmin() {
   async function setFlag(u, field, value) {
     const r = await adminApi('admin_set_flags', { target: u.id, [field]: value });
     if (!r.ok) return toast(r.error || 'Failed', 'error');
-    toast(field === 'otp_enabled' ? (value ? 'OTP enabled' : 'OTP disabled') : (value ? 'Account enabled' : 'Account disabled'), 'success');
+    toast(value ? 'OTP enabled' : 'OTP disabled', 'success');
+    refresh();
+  }
+
+  async function setStatus(u, status) {
+    if (status === 'rejected' && !window.confirm(`${u.status === 'pending' ? 'Reject' : 'Disable'} ${u.id}?`)) return;
+    const r = await adminApi('admin_set_status', { target: u.id, status });
+    if (!r.ok) return toast(r.error || 'Failed', 'error');
+    toast(status === 'active' ? `Approved ${u.id}` : `${u.id} ${status}`, 'success');
     refresh();
   }
 

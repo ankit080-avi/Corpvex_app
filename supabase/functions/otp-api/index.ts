@@ -58,6 +58,7 @@ async function sha256hex(s: string): Promise<string> {
 }
 const hashPass = (p: string) => sha256hex(`${PEPPER}:${p}`);
 const genId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+const genCode = () => String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
 
 // Merge query-string params with JSON body params (body wins if both present).
 async function readParams(req: Request): Promise<Record<string, string>> {
@@ -79,8 +80,8 @@ async function readParams(req: Request): Promise<Record<string, string>> {
 async function requireAdmin(adminKey: string) {
   if (!adminKey) return null;
   const { data } = await db.from('app_users')
-    .select('id,role,is_active').eq('poll_key', adminKey).maybeSingle();
-  return data && data.role === 'admin' && data.is_active ? data : null;
+    .select('id,role,status').eq('poll_key', adminKey).maybeSingle();
+  return data && data.role === 'admin' && data.status === 'active' ? data : null;
 }
 
 Deno.serve(async (req) => {
@@ -109,12 +110,12 @@ Deno.serve(async (req) => {
         pass_hash: await hashPass(p.p),
         poll_key: crypto.randomUUID(),
         role: isAdminId ? 'admin' : 'user',
-        is_active: true,
+        status: isAdminId ? 'active' : 'pending',
         otp_enabled: true,
       };
       const { error } = await db.from('app_users').upsert(row, { onConflict: 'id' });
       if (error) return json({ ok: false, error: error.message }, 500);
-      return json({ ok: true, name: row.name, pollKey: row.poll_key, role: row.role });
+      return json({ ok: true, name: row.name, pollKey: row.poll_key, role: row.role, status: row.status });
     }
 
     // ── login (verify the app password, hand back the poll key + role) ───────
@@ -122,15 +123,60 @@ Deno.serve(async (req) => {
       if (!user || !p.p) return json({ ok: false, error: 'user and p required' }, 400);
       const { data: u } = await db.from('app_users').select('*').eq('id', user).maybeSingle();
       if (!u) return json({ ok: false, error: 'no such user' }, 404);
-      if (!u.is_active) return json({ ok: false, error: 'account disabled — contact the admin' }, 403);
       if (u.pass_hash !== (await hashPass(p.p))) return json({ ok: false, error: 'wrong password' }, 401);
+      if (u.status === 'pending') return json({ ok: false, error: 'awaiting admin approval', status: 'pending' }, 403);
+      if (u.status === 'rejected') return json({ ok: false, error: 'access rejected — contact the admin', status: 'rejected' }, 403);
+      if (u.status !== 'active') return json({ ok: false, error: 'account not active', status: u.status }, 403);
       return json({ ok: true, name: u.name, pollKey: u.poll_key, role: u.role || 'user', otpEnabled: u.otp_enabled !== false });
     }
 
-    // ── send: ERP relays an OTP it generated (+ stored in its own users table) ─
+    // ── request: ERP asks Supabase to ISSUE an OTP (status-checked) ──────────
+    // Supabase generates + stores the code and returns it to the ERP. The app
+    // shows it via `current`; the ERP keeps the returned code for local verify.
+    if (action === 'request') {
+      if (ERP_API_KEY && p.apikey !== ERP_API_KEY) return json({ ok: false, error: 'bad apikey' }, 401);
+      if (!user) return json({ ok: false, error: 'user required' }, 400);
+      const { data: u } = await db.from('app_users').select('status,otp_enabled').eq('id', user).maybeSingle();
+      if (!u) return json({ ok: false, error: 'no app user', status: 'none' }, 404);
+      if (u.status !== 'active') return json({ ok: false, error: `user not active (${u.status})`, status: u.status }, 403);
+      if (u.otp_enabled === false) return json({ ok: false, error: 'otp disabled for this user', status: u.status }, 403);
+
+      const ttl = Math.max(30, Math.min(600, parseInt(p.ttl || '', 10) || DEFAULT_TTL));
+      const code = genCode();
+      const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
+      await db.from('otp_codes').update({ used: true }).eq('user_id', user).eq('used', false);
+      const { error } = await db.from('otp_codes').insert({
+        id: genId(), user_id: user, code, used: false, expires_at: expiresAt,
+      });
+      if (error) return json({ ok: false, error: error.message }, 500);
+      await db.from('notifications').insert({
+        id: genId(), userId: user, type: 'otp', title: 'Corpvex login code',
+        body: `Your login OTP is ${code}. Valid ${ttl}s.`, date: new Date().toISOString(),
+      });
+      return json({ ok: true, code, ttl, expiresAt });
+    }
+
+    // ── create_user: ERP provisions a new app user as 'pending' (admin approves) ─
+    if (action === 'create_user') {
+      if (ERP_API_KEY && p.apikey !== ERP_API_KEY) return json({ ok: false, error: 'bad apikey' }, 401);
+      if (!user || !p.p) return json({ ok: false, error: 'user and p (password) required' }, 400);
+      const { data: existing } = await db.from('app_users').select('id,status').eq('id', user).maybeSingle();
+      if (existing) return json({ ok: true, created: false, status: existing.status });
+      const { error } = await db.from('app_users').insert({
+        id: user, name: p.name || user, mobile: p.mobile || null,
+        pass_hash: await hashPass(p.p), poll_key: crypto.randomUUID(),
+        role: 'user', status: 'pending', otp_enabled: true,
+      });
+      if (error) return json({ ok: false, error: error.message }, 500);
+      return json({ ok: true, created: true, status: 'pending' });
+    }
+
+    // ── send: ERP relays an OTP it generated itself (status-checked) ─────────
     if (action === 'send') {
       if (ERP_API_KEY && p.apikey !== ERP_API_KEY) return json({ ok: false, error: 'bad apikey' }, 401);
       if (!user || !p.code) return json({ ok: false, error: 'user and code required' }, 400);
+      const { data: su } = await db.from('app_users').select('status').eq('id', user).maybeSingle();
+      if (!su || su.status !== 'active') return json({ ok: false, error: 'user not active', status: su?.status || 'none' }, 403);
 
       const ttl = Math.max(30, Math.min(600, parseInt(p.ttl || '', 10) || DEFAULT_TTL));
       const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
@@ -156,8 +202,8 @@ Deno.serve(async (req) => {
     // ── current: the app polls for the live code to display ──────────────────
     if (action === 'current') {
       if (!user || !p.key) return json({ ok: false, error: 'user and key required' }, 400);
-      const { data: u } = await db.from('app_users').select('poll_key,is_active').eq('id', user).maybeSingle();
-      if (!u || !u.is_active) return json({ ok: false, error: 'unknown user' }, 404);
+      const { data: u } = await db.from('app_users').select('poll_key,status').eq('id', user).maybeSingle();
+      if (!u || u.status !== 'active') return json({ ok: false, error: 'unknown or inactive user' }, 404);
       if (u.poll_key !== p.key) return json({ ok: false, error: 'bad key' }, 401);
 
       const { data: c } = await db.from('otp_codes')
@@ -174,8 +220,8 @@ Deno.serve(async (req) => {
     // True only if the account is active AND the admin hasn't disabled OTP for it.
     if (action === 'paired') {
       if (!user) return json({ ok: false, error: 'user required' }, 400);
-      const { data: u } = await db.from('app_users').select('id,is_active,otp_enabled').eq('id', user).maybeSingle();
-      return json({ ok: true, paired: !!(u && u.is_active && u.otp_enabled !== false) });
+      const { data: u } = await db.from('app_users').select('id,status,otp_enabled').eq('id', user).maybeSingle();
+      return json({ ok: true, paired: !!(u && u.status === 'active' && u.otp_enabled !== false) });
     }
 
     // ── admin: full control over app-login users (gated by an admin poll_key) ─
@@ -186,8 +232,8 @@ Deno.serve(async (req) => {
 
       if (action === 'admin_list') {
         const { data } = await db.from('app_users')
-          .select('id,name,mobile,role,is_active,otp_enabled,created_at')
-          .order('role', { ascending: true }).order('id', { ascending: true });
+          .select('id,name,mobile,role,status,otp_enabled,created_at')
+          .order('status', { ascending: true }).order('id', { ascending: true });
         return json({ ok: true, users: data || [], adminId: ADMIN_ID });
       }
 
@@ -195,7 +241,7 @@ Deno.serve(async (req) => {
         if (!target) return json({ ok: false, error: 'target user required' }, 400);
         const { data: existing } = await db.from('app_users').select('id').eq('id', target).maybeSingle();
         const row: Record<string, unknown> = { id: target, name: p.name || target, mobile: p.mobile || null };
-        if (!existing) { row.poll_key = crypto.randomUUID(); row.role = 'user'; row.is_active = true; row.otp_enabled = true; }
+        if (!existing) { row.poll_key = crypto.randomUUID(); row.role = 'user'; row.status = 'active'; row.otp_enabled = true; }
         if (p.p) row.pass_hash = await hashPass(p.p);
         if (!existing && !p.p) return json({ ok: false, error: 'a password is required for a new user' }, 400);
         const { error } = await db.from('app_users').upsert(row, { onConflict: 'id' });
@@ -203,14 +249,26 @@ Deno.serve(async (req) => {
         return json({ ok: true, created: !existing });
       }
 
+      // approve / reject / re-pending
+      if (action === 'admin_set_status') {
+        if (!target) return json({ ok: false, error: 'target user required' }, 400);
+        if (target === ADMIN_ID) return json({ ok: false, error: 'cannot change the admin account' }, 400);
+        const st = (p.status || '').toLowerCase();
+        if (!['active', 'rejected', 'pending'].includes(st)) {
+          return json({ ok: false, error: 'status must be active|rejected|pending' }, 400);
+        }
+        const { error } = await db.from('app_users').update({ status: st }).eq('id', target);
+        if (error) return json({ ok: false, error: error.message }, 500);
+        return json({ ok: true, status: st });
+      }
+
+      // toggle OTP for a user
       if (action === 'admin_set_flags') {
         if (!target) return json({ ok: false, error: 'target user required' }, 400);
         if (target === ADMIN_ID) return json({ ok: false, error: 'cannot change the admin account' }, 400);
-        const patch: Record<string, unknown> = {};
-        if (p.is_active !== undefined) patch.is_active = ['true', '1'].includes(String(p.is_active));
-        if (p.otp_enabled !== undefined) patch.otp_enabled = ['true', '1'].includes(String(p.otp_enabled));
-        if (!Object.keys(patch).length) return json({ ok: false, error: 'nothing to update' }, 400);
-        const { error } = await db.from('app_users').update(patch).eq('id', target);
+        if (p.otp_enabled === undefined) return json({ ok: false, error: 'nothing to update' }, 400);
+        const { error } = await db.from('app_users')
+          .update({ otp_enabled: ['true', '1'].includes(String(p.otp_enabled)) }).eq('id', target);
         if (error) return json({ ok: false, error: error.message }, 500);
         return json({ ok: true });
       }

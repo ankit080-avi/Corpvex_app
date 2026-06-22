@@ -25,11 +25,15 @@
 --   poll_key    = per-user secret the app stores after login; required to read OTPs
 --                 (also doubles as the bearer token for admin actions)
 --   role        = 'admin' (the software admin, id = ADMIN_ID secret) or 'user'
+--   status      = 'pending' | 'active' | 'rejected'  (lifecycle)
 --   otp_enabled = admin switch: when false, `paired` returns false so the ERP
 --                 skips app-OTP for that user (i.e. "disable OTP for this user")
--- Accounts are created by the admin (admin_upsert_user); normal self-signup is off.
--- The admin bootstraps their own password once via the register action (the id
--- matching ADMIN_ID is auto-granted role='admin').
+-- Provisioning lifecycle (see the flow diagram):
+--   ERP calls create_user -> row created status='pending'
+--   admin Approves -> status='active'  |  admin Rejects -> status='rejected'
+--   only status='active' users can log in / receive an OTP.
+-- (The admin bootstraps via register: the id matching ADMIN_ID is auto-granted
+--  role='admin' and status='active'.)
 create table if not exists public.app_users (
   id          text primary key,
   name        text,
@@ -37,13 +41,15 @@ create table if not exists public.app_users (
   pass_hash   text,
   poll_key    text,
   role        text default 'user',
-  is_active   boolean default true,
+  status      text default 'pending',
   otp_enabled boolean default true,
   created_at  timestamptz default now()
 );
--- (re-runnable) add the new columns if an older app_users already exists
+-- (re-runnable) add the newer columns if an older app_users already exists
 alter table public.app_users add column if not exists role        text default 'user';
+alter table public.app_users add column if not exists status      text default 'pending';
 alter table public.app_users add column if not exists otp_enabled boolean default true;
+create index if not exists app_users_status_idx on public.app_users (status);
 alter table public.app_users enable row level security;
 -- No anon policy => the publishable key cannot read/write this table at all.
 -- (The otp-api Edge Function uses the service-role key and bypasses RLS.)

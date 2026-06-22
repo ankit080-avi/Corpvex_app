@@ -16,15 +16,22 @@ Messaging** push.
 
 ## How it works
 
+**Provisioning (admin-gated lifecycle):**
 ```
-ERP (separate project, MSSQL)
-  ├─ generate OTP, store in its own users table (otp + otp_expiry)
-  └─ GET  /functions/v1/otp-api?action=send&user=<id>&code=<otp>   → relay it
-Phone app (this repo)
-  └─ GET  /functions/v1/otp-api?action=current&user=<id>&key=<pollKey>  → show the live code
-ERP (user typed the code)
-  └─ verify LOCALLY against its own users table  (not via this API)
+ERP  → create_user(user, password)        → app_users.status = 'pending'
+Admin app → Approve / Reject              → status = 'active' | 'rejected'
 ```
+
+**Login OTP (only for active users):**
+```
+ERP login → request(user)
+   ├─ status = active   → Supabase issues + stores a 6-digit OTP, returns it to the ERP
+   └─ status ≠ active   → error, no login
+Phone app → current(user, pollKey)        → shows the live code with a countdown
+ERP → verifies the code the user typed (kept in its own users.Otp)
+```
+(`send` is an alternative where the ERP generates the code itself and relays it —
+also status-checked. Either way the app reads the code via `current`.)
 
 - The relay stores the code only briefly (`otp_codes`); the **source of truth is
   the ERP's `users` table**.
@@ -58,16 +65,18 @@ ERP (user typed the code)
    Put the same `ERP_API_KEY` into the ERP's `corpvex_otp.py` (`API_KEY`).
 
 ### Admin
-Accounts are provisioned by a single **software admin** (id = `ADMIN_ID`, default
-`88858141463`). First-time setup: open the app → **"Admin first-time setup"** →
-enter the admin id + a password (the matching id is auto-granted the admin role).
-After that the admin signs in to a dashboard to:
-- **create** app-login users (id + password they hand out),
-- **enable/disable** an account, **reset** a password, **delete** a user,
-- **disable OTP for a particular user** — that user's `paired` check returns false,
-  so the ERP stops requiring app-OTP for them.
+A single **software admin** (id = `ADMIN_ID`, default `88858141463`) controls all
+app logins. First-time setup: open the app → **"Admin first-time setup"** → enter
+the admin id + a password (the matching id is auto-granted the admin role + active
+status). The admin then signs in to a dashboard to:
+- **Approve / Reject** users the ERP provisioned (they arrive as `pending`),
+- **create** a user directly (id + password, created `active`),
+- **disable OTP** for a user (their `paired` check returns false → ERP skips app-OTP),
+- **disable** (→ rejected), **reset password**, or **delete** a user.
 
-Normal users just **Sign in** with the credentials the admin gives them.
+User lifecycle: `pending` → admin **Approve** → `active` (can log in / get OTP);
+`pending`/`rejected` users are blocked. Normal users just **Sign in** with the
+credentials they were given, once active.
 
 ### 2. The web app
 Edit the `CONFIG` block at the top of [`app.js`](app.js):
@@ -98,17 +107,20 @@ relay the code. The helper for that lives in the **ERP** project (separate repo)
 at `corpvex_otp.py` — not in this repo. Usage:
 
 ```python
-from corpvex_otp import generate_otp, send_otp
+from corpvex_otp import create_user, request_otp
 
-code = generate_otp()                       # 6-digit string
-# 1) store in the ERP users table:
-#    UPDATE users SET otp = ?, otp_expiry = DATEADD(second, 120, GETDATE())
-#     WHERE login_id = ?
-send_otp("ankit", code)                     # 2) relay to the phone app
+# Provisioning (your ERP "create user" action): user starts 'pending'; admin approves.
+create_user("sagar", password="temp1234", name="Sagar", mobile="98765xxxxx")
 
-# 3) user types the code into the ERP -> verify LOCALLY:
-#    SELECT otp, otp_expiry FROM users WHERE login_id = ?  (compare + check expiry)
+# At login — Supabase issues the OTP only if the user is active:
+r = request_otp("sagar")
+if not r.get("ok"):
+    deny(r.get("error"))            # e.g. 'awaiting admin approval' / 'access rejected'
+else:
+    code = r["code"]                # store in users.Otp; the phone app shows it via poll
+    # ...user types it into the ERP; verify locally against users.Otp...
 ```
+(`send_otp(user, code)` remains for the ERP-generates-the-code variant.)
 
 Set `OTP_API_BASE` (and `API_KEY`, if you set the `ERP_API_KEY` secret) in that
 module to your deployed function URL.
@@ -128,7 +140,7 @@ Telegram get app-only 2FA once paired; Telegram users get both channels.
 | `firebase-config.js` / `firebase-messaging-sw.js` | optional FCM push (stubbed until filled) |
 | `manifest.webmanifest` / `icon-*.png` | PWA install metadata + icons |
 | `supabase/schema.sql` | database schema |
-| `supabase/functions/otp-api/` | relay API: send / current / paired / login / register + admin_* (list/upsert_user/set_flags/reset_password/delete_user) |
+| `supabase/functions/otp-api/` | API: create_user / request / send / current / paired / login / register + admin_* (list / set_status / upsert_user / set_flags / reset_password / delete_user) |
 | `supabase/functions/send-push/` | optional FCM fan-out on `notifications` insert |
 | `supabase/config.toml` | disables JWT enforcement on the functions |
 | `capacitor-app/` | Android wrapper + `build.ps1` (android/ & www/ are gitignored, regenerated) |
