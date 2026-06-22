@@ -71,9 +71,10 @@ async function api(action, params = {}, method = 'GET') {
     }
     let data = {};
     try { data = await res.json(); } catch { /* ignore */ }
-    return { status: res.status, ...data };
+    // NB: use httpStatus — some responses carry their own `status` (account state).
+    return { httpStatus: res.status, ...data };
   } catch {
-    return { status: 0, ok: false, error: 'Network error — check connection / config' };
+    return { httpStatus: 0, ok: false, error: 'Network error — check connection / config' };
   }
 }
 
@@ -94,9 +95,9 @@ function viewAuth() {
           el('div', { class: 'brand-sub' }, 'Authenticator'),
         ),
       ),
-      el('h1', { class: 'auth-title' }, isReg ? 'Admin setup' : 'Sign in'),
+      el('h1', { class: 'auth-title' }, isReg ? 'Create account' : 'Sign in'),
       el('p', { class: 'auth-lead' }, isReg
-        ? 'First-time setup for the software admin. Regular users sign in with the credentials the admin creates for them.'
+        ? 'Choose your own User ID + password. An admin approves the account before you can sign in.'
         : 'Sign in with your Corpvex app credentials to receive login OTPs here.'),
 
       el('label', { class: 'field' }, el('span', {}, 'User ID'),
@@ -110,11 +111,11 @@ function viewAuth() {
       el('label', { class: 'field' }, el('span', {}, isReg ? 'Set a password' : 'Password'),
         el('input', { class: 'input', id: 'f-pass', type: 'password', autocomplete: isReg ? 'new-password' : 'current-password', placeholder: '••••••••', required: true })),
 
-      el('button', { class: 'btn btn-primary', type: 'submit', id: 'f-submit' }, isReg ? 'Create admin' : 'Sign in'),
+      el('button', { class: 'btn btn-primary', type: 'submit', id: 'f-submit' }, isReg ? 'Create account' : 'Sign in'),
 
       CONFIG.ALLOW_REGISTER && el('button', { class: 'btn btn-ghost', type: 'button',
         onclick: () => { mode = isReg ? 'login' : 'register'; render(); } },
-        isReg ? '← Back to sign in' : 'Admin first-time setup'),
+        isReg ? '← Back to sign in' : 'New user? Create account'),
 
       el('div', { class: 'build-tag' }, `Corpvex Authenticator · build ${BUILD}`),
     );
@@ -135,7 +136,13 @@ function viewAuth() {
         const name = document.getElementById('f-name').value.trim();
         const mobile = document.getElementById('f-mobile').value.trim();
         const r = await api('register', { user, p: pass, name, mobile }, 'POST');
-        if (!r.ok) throw new Error(r.error || 'Setup failed');
+        if (!r.ok) throw new Error(r.error || 'Could not create account');
+        if (r.status !== 'active') {
+          // pending account — needs admin approval before it can sign in
+          toast('Account created — waiting for admin approval', 'success');
+          mode = 'login'; render();
+          return;
+        }
         session = { id: user, name: r.name || name || user, pollKey: r.pollKey, role: r.role || 'user' };
       } else {
         const r = await api('login', { user, p: pass }, 'POST');
@@ -148,7 +155,7 @@ function viewAuth() {
       route();
     } catch (err) {
       toast(err.message, 'error');
-      btn.disabled = false; btn.textContent = mode === 'register' ? 'Create admin' : 'Sign in';
+      btn.disabled = false; btn.textContent = mode === 'register' ? 'Create account' : 'Sign in';
     }
   }
 
@@ -197,7 +204,7 @@ async function poll() {
   if (configMissing(true)) return;
   try {
     const r = await api('current', { user: session.id, key: session.pollKey });
-    if (r.status === 401) { toast('Session expired — sign in again', 'error'); return logout(); }
+    if (r.httpStatus === 401) { toast('Session expired — sign in again', 'error'); return logout(); }
     if (r.ok && r.code) {
       if (!current || current.code !== r.code) current = { code: r.code, expiresAt: r.expiresAt };
     } else if (r.ok && r.none) {
@@ -302,7 +309,7 @@ function viewAdmin() {
     if (configMissing(true)) return listHost.replaceChildren(el('div', { class: 'muted' }, 'Set SUPABASE_URL / key in app.js first.'));
     listHost.replaceChildren(el('div', { class: 'muted' }, 'Loading…'));
     const r = await adminApi('admin_list');
-    if (r.status === 401) { toast('Admin session expired', 'error'); return logout(); }
+    if (r.httpStatus === 401) { toast('Admin session expired', 'error'); return logout(); }
     if (!r.ok) return listHost.replaceChildren(el('div', { class: 'muted' }, r.error || 'Failed to load'));
     if (!r.users || !r.users.length) return listHost.replaceChildren(el('div', { class: 'muted' }, 'No users yet — add one above.'));
     const ord = { pending: 0, active: 1, rejected: 2 };

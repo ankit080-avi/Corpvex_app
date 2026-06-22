@@ -30,7 +30,6 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const PEPPER = Deno.env.get('OTP_PEPPER') ?? 'corpvex';
 const ERP_API_KEY = Deno.env.get('ERP_API_KEY') ?? '';
-const ALLOW_SELF_REGISTER = (Deno.env.get('ALLOW_SELF_REGISTER') ?? '0') === '1';
 // The software admin's id (full control over app-login users). Defaults to the
 // number you gave; override with the ADMIN_ID secret.
 const ADMIN_ID = (Deno.env.get('ADMIN_ID') ?? '88858141463').trim();
@@ -92,16 +91,17 @@ Deno.serve(async (req) => {
   const user = (p.user || '').trim();
 
   try {
-    // ── register: admin first-time setup (or self-signup if explicitly allowed) ─
+    // ── register: self sign-up. Anyone can create an account with their OWN
+    //    password; it starts 'pending' until the admin approves it. The admin id
+    //    bootstraps itself as an active admin. Never overwrites an existing user.
     if (action === 'register') {
-      const isAdminId = !!user && user === ADMIN_ID;
-      if (!isAdminId && !ALLOW_SELF_REGISTER) {
-        return json({ ok: false, error: 'registration disabled — ask the admin to create your account' }, 403);
-      }
       if (!user || !p.p) return json({ ok: false, error: 'user and p required' }, 400);
+      const isAdminId = user === ADMIN_ID;
       const { data: existing } = await db.from('app_users').select('id,role').eq('id', user).maybeSingle();
-      if (isAdminId && existing && existing.role === 'admin') {
-        return json({ ok: false, error: 'admin already set up — sign in instead' }, 409);
+      if (existing) {
+        return json({ ok: false, error: (isAdminId && existing.role === 'admin')
+          ? 'admin already set up — sign in instead'
+          : 'this user already exists — sign in instead' }, 409);
       }
       const row = {
         id: user,
@@ -113,7 +113,7 @@ Deno.serve(async (req) => {
         status: isAdminId ? 'active' : 'pending',
         otp_enabled: true,
       };
-      const { error } = await db.from('app_users').upsert(row, { onConflict: 'id' });
+      const { error } = await db.from('app_users').insert(row);
       if (error) return json({ ok: false, error: error.message }, 500);
       return json({ ok: true, name: row.name, pollKey: row.poll_key, role: row.role, status: row.status });
     }
