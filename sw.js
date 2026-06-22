@@ -1,7 +1,7 @@
 // Corpvex Authenticator service worker — network-first so updates show
 // immediately; cache provides an offline shell fallback.
 
-const VERSION = 'corpvex-v1';
+const VERSION = 'corpvex-v2';
 const CORE = ['./', './index.html', './styles.css', './app.js',
               './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
