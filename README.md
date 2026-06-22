@@ -52,11 +52,22 @@ ERP (user typed the code)
    ```bash
    supabase secrets set OTP_PEPPER=<random-string>     # app password hashing salt
    supabase secrets set ERP_API_KEY=<random-string>    # the ERP must send this on `send`
-   supabase secrets set ALLOW_SELF_REGISTER=1          # lets the app pair new devices
+   supabase secrets set ADMIN_ID=88858141463           # the software admin's id
+   # ALLOW_SELF_REGISTER stays OFF — the admin creates all normal users.
    ```
-   Put the same `ERP_API_KEY` into `erp_integration/corpvex_otp.py` (`API_KEY`).
-   Turn `ALLOW_SELF_REGISTER` off (or unset) once your users are paired — after
-   that, create users by inserting rows server-side instead.
+   Put the same `ERP_API_KEY` into the ERP's `corpvex_otp.py` (`API_KEY`).
+
+### Admin
+Accounts are provisioned by a single **software admin** (id = `ADMIN_ID`, default
+`88858141463`). First-time setup: open the app → **"Admin first-time setup"** →
+enter the admin id + a password (the matching id is auto-granted the admin role).
+After that the admin signs in to a dashboard to:
+- **create** app-login users (id + password they hand out),
+- **enable/disable** an account, **reset** a password, **delete** a user,
+- **disable OTP for a particular user** — that user's `paired` check returns false,
+  so the ERP stops requiring app-OTP for them.
+
+Normal users just **Sign in** with the credentials the admin gives them.
 
 ### 2. The web app
 Edit the `CONFIG` block at the top of [`app.js`](app.js):
@@ -117,7 +128,7 @@ Telegram get app-only 2FA once paired; Telegram users get both channels.
 | `firebase-config.js` / `firebase-messaging-sw.js` | optional FCM push (stubbed until filled) |
 | `manifest.webmanifest` / `icon-*.png` | PWA install metadata + icons |
 | `supabase/schema.sql` | database schema |
-| `supabase/functions/otp-api/` | the relay API (send / current / paired / login / register) |
+| `supabase/functions/otp-api/` | relay API: send / current / paired / login / register + admin_* (list/upsert_user/set_flags/reset_password/delete_user) |
 | `supabase/functions/send-push/` | optional FCM fan-out on `notifications` insert |
 | `supabase/config.toml` | disables JWT enforcement on the functions |
 | `capacitor-app/` | Android wrapper + `build.ps1` (android/ & www/ are gitignored, regenerated) |
