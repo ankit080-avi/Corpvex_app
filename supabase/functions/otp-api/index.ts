@@ -150,6 +150,13 @@ Deno.serve(async (req) => {
       return json({ ok: true, code: c.code, expiresAt: c.expires_at, remaining });
     }
 
+    // ── paired: ERP asks whether a user has linked the app (drives 2FA gating) ─
+    if (action === 'paired') {
+      if (!user) return json({ ok: false, error: 'user required' }, 400);
+      const { data: u } = await db.from('app_users').select('id,is_active').eq('id', user).maybeSingle();
+      return json({ ok: true, paired: !!(u && u.is_active) });
+    }
+
     return json({ ok: false, error: `unknown action '${action}'` }, 400);
   } catch (e) {
     return json({ ok: false, error: String(e) }, 500);

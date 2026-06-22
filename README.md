@@ -102,6 +102,10 @@ send_otp("ankit", code)                     # 2) relay to the phone app
 Set `OTP_API_BASE` (and `API_KEY`, if you set the `ERP_API_KEY` secret) in that
 module to your deployed function URL.
 
+The ERP decides whether to require app-OTP by calling `is_paired(user)` →
+`?action=paired&user=<id>` (true once the user has linked the app). Users without
+Telegram get app-only 2FA once paired; Telegram users get both channels.
+
 ---
 
 ## Files
@@ -113,7 +117,7 @@ module to your deployed function URL.
 | `firebase-config.js` / `firebase-messaging-sw.js` | optional FCM push (stubbed until filled) |
 | `manifest.webmanifest` / `icon-*.png` | PWA install metadata + icons |
 | `supabase/schema.sql` | database schema |
-| `supabase/functions/otp-api/` | the relay API (send / current / login / register) |
+| `supabase/functions/otp-api/` | the relay API (send / current / paired / login / register) |
 | `supabase/functions/send-push/` | optional FCM fan-out on `notifications` insert |
 | `supabase/config.toml` | disables JWT enforcement on the functions |
 | `capacitor-app/` | Android wrapper + `build.ps1` (android/ & www/ are gitignored, regenerated) |
