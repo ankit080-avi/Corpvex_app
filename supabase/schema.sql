@@ -3,10 +3,12 @@
 -- Paste into your project's  Dashboard -> SQL Editor -> Run.
 --
 -- Design notes
---  * The app is an OTP authenticator for the Corpvex ERP desktop login.
---    The ERP triggers an OTP (GET .../otp-api?action=request&user=<id>); the
---    phone app polls (GET .../otp-api?action=current&user=<id>&key=<pollKey>)
---    and shows the code; the ERP verifies it (GET .../otp-api?action=verify...).
+--  * The ERP and the app are SEPARATE projects. The ERP (MSSQL) generates the
+--    OTP, stores it in its OWN `users` table, and verifies it there. This DB is
+--    only a RELAY: the ERP pushes the code (GET .../otp-api?action=send&user=<id>
+--    &code=<otp>); the phone app polls (action=current&user=<id>&key=<pollKey>)
+--    and shows it. So otp_codes below is a short-lived relay copy, NOT the source
+--    of truth (that's the ERP's users table).
 --  * Text ids (the app / edge function supply their own), matching the template.
 --  * SECURITY BOUNDARY: app_users and otp_codes have RLS that DENIES the anon
 --    (publishable) key. They are touched ONLY by the otp-api Edge Function, which
@@ -36,13 +38,12 @@ alter table public.app_users enable row level security;
 revoke all on public.app_users from anon, authenticated;
 
 -- ── otp_codes ────────────────────────────────────────────────────────────────
--- One row per OTP request. Older unused codes for a user are marked used when a
--- new one is issued, so only the newest is ever valid.
+-- Relay copy of the ERP-issued OTP. The ERP pushes a code via `action=send`;
+-- older unused codes for the user are superseded so only the newest is readable.
 create table if not exists public.otp_codes (
   id         text primary key,
   user_id    text not null,
   code       text not null,
-  attempts   integer default 0,
   used       boolean default false,
   created_at timestamptz default now(),
   expires_at timestamptz not null

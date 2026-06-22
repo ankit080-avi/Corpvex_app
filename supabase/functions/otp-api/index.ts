@@ -1,23 +1,27 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// otp-api — Corpvex Authenticator OTP service (Supabase Edge Function)
+// otp-api — Corpvex Authenticator relay (Supabase Edge Function)
 //
-// One function, several actions. Params can come from the query string (GET) OR a
-// JSON body (POST) — the ERP uses simple GET URLs; the app uses POST for login so
-// the password never lands in a URL/log.
+// IMPORTANT: this is only a RELAY. The Corpvex ERP (a separate project, on MSSQL)
+// GENERATES the OTP and stores it in its own `users` table, and VERIFIES it there.
+// This function just carries the ERP-issued code to the paired phone app.
 //
-//   GET  ?action=request&user=<id>[&ttl=120]      (ERP)  -> issue an OTP, push it
-//   GET  ?action=current&user=<id>&key=<pollKey>  (app)  -> read the live OTP
-//   GET  ?action=verify&user=<id>&code=<n>        (ERP)  -> validate the OTP
-//   POST  {action:'login',    user, p}            (app)  -> {ok, name, pollKey}
-//   POST  {action:'register', user, p, name, mobile}     -> create/pair a user
+// Params may come from the query string (GET) or a JSON body (POST).
 //
-// Deploy WITHOUT JWT enforcement so the ERP can call with a bare URL:
+//   GET  ?action=send&user=<id>&code=<otp>[&ttl=120][&apikey=<k>]  (ERP)
+//        -> store the ERP-issued code so the app can read it; optional push
+//   GET  ?action=current&user=<id>&key=<pollKey>                   (app)
+//        -> return the live code to display
+//   POST  {action:'login',    user, p}            (app) -> {ok, name, pollKey}
+//   POST  {action:'register', user, p, name, mobile}    -> create/pair an app user
+//
+// Deploy without JWT enforcement (see supabase/config.toml):
 //   supabase functions deploy otp-api --no-verify-jwt
-// (or set verify_jwt=false in supabase/config.toml — included in this repo.)
 //
-// Auto-injected by the platform: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
-// Optional secrets: OTP_PEPPER (salt for password hashing),
-//                   ALLOW_SELF_REGISTER ('1' to permit the register action).
+// Auto-injected: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+// Optional secrets:
+//   ERP_API_KEY         -> if set, the `send` action requires &apikey=<this>
+//   OTP_PEPPER          -> salt for app password hashing
+//   ALLOW_SELF_REGISTER -> '1' to permit the register action
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
@@ -25,10 +29,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const PEPPER = Deno.env.get('OTP_PEPPER') ?? 'corpvex';
+const ERP_API_KEY = Deno.env.get('ERP_API_KEY') ?? '';
 const ALLOW_SELF_REGISTER = (Deno.env.get('ALLOW_SELF_REGISTER') ?? '0') === '1';
 
-const DEFAULT_TTL = 120;     // seconds an OTP stays valid
-const MAX_ATTEMPTS = 5;      // wrong tries before the code locks
+const DEFAULT_TTL = 120; // seconds the relayed code stays readable by the app
 
 const db = createClient(SUPABASE_URL, SERVICE_KEY);
 
@@ -50,7 +54,6 @@ async function sha256hex(s: string): Promise<string> {
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 const hashPass = (p: string) => sha256hex(`${PEPPER}:${p}`);
-const genCode = () => String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
 const genId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
 // Merge query-string params with JSON body params (body wins if both present).
@@ -77,7 +80,7 @@ Deno.serve(async (req) => {
   const user = (p.user || '').trim();
 
   try {
-    // ── register / pair a user ───────────────────────────────────────────────
+    // ── register / pair an app user ──────────────────────────────────────────
     if (action === 'register') {
       if (!ALLOW_SELF_REGISTER) return json({ ok: false, error: 'registration disabled' }, 403);
       if (!user || !p.p) return json({ ok: false, error: 'user and p required' }, 400);
@@ -95,7 +98,7 @@ Deno.serve(async (req) => {
       return json({ ok: true, name: row.name, pollKey });
     }
 
-    // ── login (verify password, hand back the poll key) ──────────────────────
+    // ── login (verify the app password, hand back the poll key) ──────────────
     if (action === 'login') {
       if (!user || !p.p) return json({ ok: false, error: 'user and p required' }, 400);
       const { data: u } = await db.from('app_users').select('*').eq('id', user).maybeSingle();
@@ -104,36 +107,33 @@ Deno.serve(async (req) => {
       return json({ ok: true, name: u.name, pollKey: u.poll_key });
     }
 
-    // ── request: ERP asks for an OTP to be issued + pushed ────────────────────
-    if (action === 'request') {
-      if (!user) return json({ ok: false, error: 'user required' }, 400);
-      const { data: u } = await db.from('app_users').select('id,name,is_active').eq('id', user).maybeSingle();
-      if (!u || !u.is_active) return json({ ok: false, error: 'unknown user' }, 404);
+    // ── send: ERP relays an OTP it generated (+ stored in its own users table) ─
+    if (action === 'send') {
+      if (ERP_API_KEY && p.apikey !== ERP_API_KEY) return json({ ok: false, error: 'bad apikey' }, 401);
+      if (!user || !p.code) return json({ ok: false, error: 'user and code required' }, 400);
 
       const ttl = Math.max(30, Math.min(600, parseInt(p.ttl || '', 10) || DEFAULT_TTL));
-      const code = genCode();
-      const now = Date.now();
-      const expiresAt = new Date(now + ttl * 1000).toISOString();
+      const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
 
-      // invalidate any still-live codes, then insert the fresh one
+      // supersede any still-live relayed code, then store the new one
       await db.from('otp_codes').update({ used: true }).eq('user_id', user).eq('used', false);
       const { error } = await db.from('otp_codes').insert({
-        id: genId(), user_id: user, code, used: false, expires_at: expiresAt,
+        id: genId(), user_id: user, code: String(p.code), used: false, expires_at: expiresAt,
       });
       if (error) return json({ ok: false, error: error.message }, 500);
 
-      // fire a push (optional — works only if device_tokens + send-push are set up)
+      // optional push (works only if device_tokens + send-push are configured)
       await db.from('notifications').insert({
         id: genId(), userId: user, type: 'otp',
         title: 'Corpvex login code',
-        body: `Your login OTP is ${code}. Valid ${ttl}s. Ignore if this wasn't you.`,
-        date: new Date(now).toISOString(),
+        body: `Your login OTP is ${p.code}. Valid ${ttl}s. Ignore if this wasn't you.`,
+        date: new Date().toISOString(),
       });
 
-      return json({ ok: true, ttl, expiresAt }); // NB: code is never returned to the ERP
+      return json({ ok: true, ttl, expiresAt });
     }
 
-    // ── current: the app polls for the live OTP to display ───────────────────
+    // ── current: the app polls for the live code to display ──────────────────
     if (action === 'current') {
       if (!user || !p.key) return json({ ok: false, error: 'user and key required' }, 400);
       const { data: u } = await db.from('app_users').select('poll_key,is_active').eq('id', user).maybeSingle();
@@ -148,24 +148,6 @@ Deno.serve(async (req) => {
 
       const remaining = Math.max(0, Math.floor((new Date(c.expires_at).getTime() - Date.now()) / 1000));
       return json({ ok: true, code: c.code, expiresAt: c.expires_at, remaining });
-    }
-
-    // ── verify: ERP checks the code the user typed ───────────────────────────
-    if (action === 'verify') {
-      if (!user || !p.code) return json({ ok: false, error: 'user and code required' }, 400);
-      const { data: c } = await db.from('otp_codes')
-        .select('id,code,attempts').eq('user_id', user).eq('used', false)
-        .gt('expires_at', new Date().toISOString())
-        .order('created_at', { ascending: false }).limit(1).maybeSingle();
-      if (!c) return json({ ok: false, error: 'no active code' }, 410);
-
-      if (String(c.code) === String(p.code).trim()) {
-        await db.from('otp_codes').update({ used: true }).eq('id', c.id);
-        return json({ ok: true, verified: true });
-      }
-      const attempts = (c.attempts ?? 0) + 1;
-      await db.from('otp_codes').update({ attempts, used: attempts >= MAX_ATTEMPTS }).eq('id', c.id);
-      return json({ ok: false, verified: false, locked: attempts >= MAX_ATTEMPTS, attemptsLeft: Math.max(0, MAX_ATTEMPTS - attempts) }, 401);
     }
 
     return json({ ok: false, error: `unknown action '${action}'` }, 400);
