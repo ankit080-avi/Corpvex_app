@@ -323,22 +323,38 @@ async function fpApprove() {
 }
 
 async function onFpClick() {
+  const liveCode = !!(current && awaitingConsume);
+  if (window.Capacitor) {
+    if (!liveCode) return toast('No login request to approve yet', 'info');
+    return triggerBiometricApproval(current.code);
+  }
+  if (!await fpSupported()) return toast('No usable fingerprint sensor on this device', 'info');
   if (!fpRegistered()) { if (await fpRegister()) refreshFpButton(); return; }
+  if (!liveCode) return toast('No login request to approve yet', 'info');
   await fpApprove();
 }
 
 async function refreshFpButton() {
   const btn = document.getElementById('fp-btn');
   if (!btn) return;
-  if (window.Capacitor) { btn.style.display = 'none'; return; }  // native plugin handles it
-  if (!await fpSupported()) { btn.style.display = 'none'; return; }
-  btn.style.display = '';
+  btn.style.display = '';   // always show on the code screen
+  const liveCode = !!(current && awaitingConsume);
+  if (window.Capacitor) {
+    btn.textContent = liveCode ? '👆 Approve with fingerprint' : '👆 Fingerprint login ready';
+    btn.disabled = !liveCode;
+    return;
+  }
+  if (!await fpSupported()) {
+    btn.textContent = '👆 Fingerprint not available on this device';
+    btn.disabled = true;
+    return;
+  }
   if (!fpRegistered()) {
     btn.textContent = '👆 Enable fingerprint approval'; btn.disabled = false;
   } else if (current && awaitingConsume) {
     btn.textContent = '👆 Approve with fingerprint'; btn.disabled = false;
   } else {
-    btn.textContent = '👆 Fingerprint enabled'; btn.disabled = true;
+    btn.textContent = '👆 Fingerprint ready — waiting for a login'; btn.disabled = true;
   }
 }
 
