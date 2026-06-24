@@ -235,6 +235,39 @@ Deno.serve(async (req) => {
       return json({ ok: true, none: true });
     }
 
+    // approve: app approves the active OTP request after biometric validation
+    if (action === 'approve') {
+      if (!user || !p.key) return json({ ok: false, error: 'user and key required' }, 400);
+      const { data: u } = await db.from('app_users').select('poll_key,status').eq('id', user).maybeSingle();
+      if (!u || u.status !== 'active') return json({ ok: false, error: 'unknown or inactive user' }, 404);
+      if (u.poll_key !== p.key) return json({ ok: false, error: 'bad key' }, 401);
+
+      // Mark the OTP as consumed (which triggers approval)
+      const { data, error } = await db.from('otp_codes')
+        .update({ used: true, consumed_at: new Date().toISOString() })
+        .eq('user_id', user).eq('used', false).select('id');
+      if (error) return json({ ok: false, error: error.message }, 500);
+      return json({ ok: true, approved: (data?.length || 0) > 0 });
+    }
+
+    // check_approval: ERP checks if the user approved the login on their phone
+    if (action === 'check_approval') {
+      if (ERP_API_KEY && p.apikey !== ERP_API_KEY) return json({ ok: false, error: 'bad apikey' }, 401);
+      if (!user) return json({ ok: false, error: 'user required' }, 400);
+
+      const { data: c } = await db.from('otp_codes')
+        .select('used, consumed_at, expires_at')
+        .eq('user_id', user)
+        .order('created_at', { ascending: false }).limit(1).maybeSingle();
+
+      if (c) {
+        const isExpired = new Date(c.expires_at).getTime() < Date.now();
+        const isApproved = !!c.consumed_at && !isExpired;
+        return json({ ok: true, approved: isApproved, expired: isExpired });
+      }
+      return json({ ok: true, approved: false, none: true });
+    }
+
     // ── paired: ERP asks whether to require app-OTP for this user ────────────
     // True only if the account is active AND the admin hasn't disabled OTP for it.
     if (action === 'paired') {

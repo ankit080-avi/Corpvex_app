@@ -174,6 +174,8 @@ function viewHome() {
   const statusEl = el('div', { class: 'otp-status', id: 'otp-status' }, 'Waiting for a login request…');
   const copyBtn = el('button', { class: 'btn btn-primary', id: 'copy-btn', disabled: true,
     onclick: copyCode }, 'Copy code');
+  const fpBtn = el('button', { class: 'btn btn-ghost btn-sm', id: 'fp-btn', onclick: onFpClick }, '👆 Fingerprint');
+  fpBtn.style.display = 'none';   // shown by refreshFpButton() when supported
 
   const screen = el('div', { class: 'otp-screen' },
     el('div', { class: 'topbar' },
@@ -189,35 +191,184 @@ function viewHome() {
       ring,
       statusEl,
       copyBtn,
+      fpBtn,
     ),
     el('p', { class: 'otp-help' },
       'When you sign in to the Corpvex ERP, your one-time code shows up here. Type it into the ERP before it expires.'),
   );
   $view().replaceChildren(screen);
   startPolling();
+  refreshFpButton();
 }
 
 let current = null;          // { code, expiresAt }
 let successUntil = 0;        // show "Login successful" until this timestamp
 let awaitingConsume = false; // a code was displayed; waiting for the ERP to consume it
+let lastBiometricPromptCode = null;
+
+async function triggerBiometricApproval(code) {
+  const cap = window.Capacitor;
+  if (!cap) {
+    console.info('[Biometrics] Not running inside Capacitor - skipping.');
+    return;
+  }
+  const NativeBiometric = cap.Plugins?.NativeBiometric;
+  if (!NativeBiometric) {
+    console.warn('[Biometrics] NativeBiometric plugin not found.');
+    return;
+  }
+  try {
+    const result = await NativeBiometric.isAvailable();
+    if (result.isAvailable) {
+      await NativeBiometric.verifyIdentity({
+        reason: "Confirm login request to Corpvex ERP",
+        title: "Biometric Approval",
+        subtitle: "Verify fingerprint to log in",
+        description: "Scan your fingerprint to approve the login request on your PC.",
+      });
+      
+      const r = await api('approve', { user: session.id, key: session.pollKey }, 'POST');
+      if (r.ok) {
+        toast('Login Approved!', 'success');
+        current = null;
+        successUntil = Date.now() + 6000;
+        awaitingConsume = false;
+        paintOtp();
+      }
+    }
+  } catch (err) {
+    console.warn('[Biometrics] Verification failed or canceled:', err);
+  }
+}
+
+/* ═══ WebAuthn fingerprint (browser / PWA) ═══════════════════════════════════
+   The installed Android app uses Capacitor NativeBiometric (auto-prompt above).
+   In a plain browser there is no such plugin, so we use WebAuthn: the phone's
+   built-in fingerprint/face gates the `approve` call. Same security model as the
+   APK — biometric is a LOCAL gate; the `approve` API itself is authenticated by
+   the per-user pollKey. (Hardening path: verify the WebAuthn assertion server-
+   side in the Edge Function — not done here, to match the native flow.)
+   Browsers require a user gesture to invoke WebAuthn, so this is button-driven. */
+const FP_KEY = (id) => 'corpvex-fp-' + id;
+let _fpSupported = null;
+async function fpSupported() {
+  if (_fpSupported !== null) return _fpSupported;
+  try {
+    _fpSupported = !!window.PublicKeyCredential &&
+      await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+  } catch { _fpSupported = false; }
+  return _fpSupported;
+}
+const fpRegistered = () => !!(session && localStorage.getItem(FP_KEY(session.id)));
+
+function b64urlEncode(buf) {
+  let s = ''; const bytes = new Uint8Array(buf);
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64urlDecode(str) {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (str.length % 4) str += '=';
+  const bin = atob(str); const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function fpRegister() {
+  if (!session) return false;
+  try {
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp: { name: 'Corpvex', id: location.hostname },
+      user: { id: new TextEncoder().encode(session.id), name: session.id,
+              displayName: session.name || session.id },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' },
+      timeout: 60000, attestation: 'none',
+    }});
+    localStorage.setItem(FP_KEY(session.id), b64urlEncode(cred.rawId));
+    toast('Fingerprint enabled ✓', 'success');
+    return true;
+  } catch (err) {
+    console.warn('[WebAuthn] register failed', err);
+    toast('Could not enable fingerprint', 'error');
+    return false;
+  }
+}
+
+async function fpApprove() {
+  const credId = session && localStorage.getItem(FP_KEY(session.id));
+  if (!credId) return false;
+  try {
+    await navigator.credentials.get({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      allowCredentials: [{ type: 'public-key', id: b64urlDecode(credId) }],
+      userVerification: 'required', timeout: 60000, rpId: location.hostname,
+    }});
+  } catch (err) {
+    console.warn('[WebAuthn] verify canceled/failed', err);
+    toast('Fingerprint not verified', 'error');
+    return false;
+  }
+  const r = await api('approve', { user: session.id, key: session.pollKey }, 'POST');
+  if (r.ok) {
+    toast('Login approved ✓', 'success');
+    current = null; successUntil = Date.now() + 6000; awaitingConsume = false;
+    lastBiometricPromptCode = null;
+    paintOtp(); refreshFpButton();
+    return true;
+  }
+  toast('Approval failed', 'error');
+  return false;
+}
+
+async function onFpClick() {
+  if (!fpRegistered()) { if (await fpRegister()) refreshFpButton(); return; }
+  await fpApprove();
+}
+
+async function refreshFpButton() {
+  const btn = document.getElementById('fp-btn');
+  if (!btn) return;
+  if (window.Capacitor) { btn.style.display = 'none'; return; }  // native plugin handles it
+  if (!await fpSupported()) { btn.style.display = 'none'; return; }
+  btn.style.display = '';
+  if (!fpRegistered()) {
+    btn.textContent = '👆 Enable fingerprint approval'; btn.disabled = false;
+  } else if (current && awaitingConsume) {
+    btn.textContent = '👆 Approve with fingerprint'; btn.disabled = false;
+  } else {
+    btn.textContent = '👆 Fingerprint enabled'; btn.disabled = true;
+  }
+}
 
 async function poll() {
   if (!session) return;
   if (configMissing(true)) return;
   try {
     const r = await api('current', { user: session.id, key: session.pollKey });
-    if (r.httpStatus === 401) { toast('Session expired — sign in again', 'error'); return logout(); }
+    if (r.httpStatus === 401) { toast('Session expired - sign in again', 'error'); return logout(); }
     if (r.ok && r.code) {
-      if (!current || current.code !== r.code) current = { code: r.code, expiresAt: r.expiresAt };
-      awaitingConsume = true; successUntil = 0;
-    } else if (r.ok && r.consumed) {
-      current = null;
-      if (awaitingConsume) { successUntil = Date.now() + 6000; awaitingConsume = false; }
-    } else if (r.ok && r.none) {
-      current = null;
+      if (!current || current.code !== r.code) {
+        current = { code: r.code, expiresAt: r.expiresAt };
+        awaitingConsume = true; successUntil = 0;
+        if (lastBiometricPromptCode !== r.code) {
+          lastBiometricPromptCode = r.code;
+          triggerBiometricApproval(r.code);
+        }
+      }
+    } else {
+      lastBiometricPromptCode = null;
+      if (r.ok && r.consumed) {
+        current = null;
+        if (awaitingConsume) { successUntil = Date.now() + 6000; awaitingConsume = false; }
+      } else if (r.ok && r.none) {
+        current = null;
+      }
     }
-  } catch { /* network blip — keep last state */ }
+  } catch { /* network blip - keep last state */ }
   paintOtp();
+  refreshFpButton();
 }
 
 function paintOtp() {
