@@ -34,7 +34,7 @@ const ERP_API_KEY = Deno.env.get('ERP_API_KEY') ?? '';
 // number you gave; override with the ADMIN_ID secret.
 const ADMIN_ID = (Deno.env.get('ADMIN_ID') ?? '88858141463').trim();
 
-const DEFAULT_TTL = 120; // seconds the relayed code stays readable by the app
+const DEFAULT_TTL = 60; // seconds the relayed code stays readable by the app
 
 const db = createClient(SUPABASE_URL, SERVICE_KEY);
 

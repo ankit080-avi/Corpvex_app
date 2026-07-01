@@ -426,7 +426,7 @@ function paintOtp() {
     copyBtn.disabled = false;
     if (ringNum) ringNum.textContent = remaining;
     if (ringFill) {
-      const pct = Math.min(100, Math.max(0, (remaining / 120) * 100));
+      const pct = Math.min(100, Math.max(0, (remaining / 60) * 100));
       ringFill.style.setProperty('--pct', pct + '%');
       ringFill.className = 'ring-fill' + (remaining <= 15 ? ' low' : '');
     }
