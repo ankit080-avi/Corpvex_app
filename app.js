@@ -177,6 +177,9 @@ function viewHome() {
   const fpBtn = el('button', { class: 'btn btn-ghost btn-sm', id: 'fp-btn', onclick: onFpClick }, '👆 Fingerprint');
   fpBtn.style.display = 'none';   // shown by refreshFpButton() when supported
 
+  const bannerEl = el('div', { class: 'announcement-banner hidden', id: 'announcement-banner' });
+  const historyEl = el('div', { class: 'history-section', id: 'history-section' });
+
   const screen = el('div', { class: 'otp-screen' },
     el('div', { class: 'topbar' },
       el('div', { class: 'topbar-id' },
@@ -185,6 +188,7 @@ function viewHome() {
       ),
       el('button', { class: 'btn btn-ghost btn-sm', onclick: logout }, 'Sign out'),
     ),
+    bannerEl,
     el('div', { class: 'card otp-card' },
       el('div', { class: 'otp-label' }, 'Your login code'),
       codeEl,
@@ -193,12 +197,14 @@ function viewHome() {
       copyBtn,
       fpBtn,
     ),
+    historyEl,
     el('p', { class: 'otp-help' },
       'When you sign in to the Corpvex ERP, your one-time code shows up here. Type it into the ERP before it expires.'),
   );
   $view().replaceChildren(screen);
   startPolling();
   refreshFpButton();
+  loadHistory();
 }
 
 let current = null;          // { code, expiresAt }
@@ -234,6 +240,7 @@ async function triggerBiometricApproval(code) {
         successUntil = Date.now() + 6000;
         awaitingConsume = false;
         paintOtp();
+        loadHistory();
       }
     }
   } catch (err) {
@@ -316,6 +323,7 @@ async function fpApprove() {
     current = null; successUntil = Date.now() + 6000; awaitingConsume = false;
     lastBiometricPromptCode = null;
     paintOtp(); refreshFpButton();
+    loadHistory();
     return true;
   }
   toast('Approval failed', 'error');
@@ -364,6 +372,7 @@ async function poll() {
   try {
     const r = await api('current', { user: session.id, key: session.pollKey });
     if (r.httpStatus === 401) { toast('Session expired - sign in again', 'error'); return logout(); }
+    updateAnnouncement(r.announcement);
     if (r.ok && r.code) {
       if (!current || current.code !== r.code) {
         current = { code: r.code, expiresAt: r.expiresAt };
@@ -377,7 +386,11 @@ async function poll() {
       lastBiometricPromptCode = null;
       if (r.ok && r.consumed) {
         current = null;
-        if (awaitingConsume) { successUntil = Date.now() + 6000; awaitingConsume = false; }
+        if (awaitingConsume) {
+          successUntil = Date.now() + 6000;
+          awaitingConsume = false;
+          loadHistory();
+        }
       } else if (r.ok && r.none) {
         current = null;
       }
@@ -651,6 +664,67 @@ function route() {
     if (session.role === 'admin') viewAdmin();
     else viewHome();
   } else viewAuth();
+}
+
+function updateAnnouncement(msg) {
+  const banner = document.getElementById('announcement-banner');
+  if (!banner) return;
+  if (msg) {
+    banner.textContent = msg;
+    banner.classList.remove('hidden');
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
+async function loadHistory() {
+  if (!session) return;
+  try {
+    const r = await api('history', { user: session.id, key: session.pollKey });
+    if (r.ok && r.history) {
+      paintHistory(r.history);
+    }
+  } catch { /* ignore error */ }
+}
+
+function paintHistory(historyList) {
+  const container = document.getElementById('history-section');
+  if (!container) return;
+
+  if (!historyList || historyList.length === 0) {
+    container.replaceChildren(
+      el('div', { class: 'history-title' }, 'Recent Logins'),
+      el('div', { class: 'history-empty' }, 'No recent logins recorded')
+    );
+    return;
+  }
+
+  const items = historyList.map(item => {
+    const date = new Date(item.consumed_at);
+    const timeStr = formatRelativeTime(date);
+    return el('div', { class: 'history-item' },
+      el('span', { class: 'history-dot' }),
+      el('span', { class: 'history-time' }, timeStr),
+      el('span', { class: 'history-badge' }, 'Approved')
+    );
+  });
+
+  container.replaceChildren(
+    el('div', { class: 'history-title' }, 'Recent Logins'),
+    el('div', { class: 'history-list' }, items)
+  );
+}
+
+function formatRelativeTime(date) {
+  const diffMs = Date.now() - date.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  const diffMin = Math.floor(diffSec / 60);
+  const diffHr = Math.floor(diffMin / 60);
+
+  if (diffSec < 60) return 'Just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffHr < 24) return `${diffHr}h ago`;
+  return date.toLocaleDateString();
 }
 
 // Re-poll immediately when the app comes back to the foreground.

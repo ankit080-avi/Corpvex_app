@@ -217,22 +217,24 @@ Deno.serve(async (req) => {
       if (!u || u.status !== 'active') return json({ ok: false, error: 'unknown or inactive user' }, 404);
       if (u.poll_key !== p.key) return json({ ok: false, error: 'bad key' }, 401);
 
+      const announcement = Deno.env.get('SYSTEM_ANNOUNCEMENT') || '';
+
       const { data: c } = await db.from('otp_codes')
         .select('code,expires_at').eq('user_id', user).eq('used', false)
         .gt('expires_at', new Date().toISOString())
         .order('created_at', { ascending: false }).limit(1).maybeSingle();
       if (c) {
         const remaining = Math.max(0, Math.floor((new Date(c.expires_at).getTime() - Date.now()) / 1000));
-        return json({ ok: true, code: c.code, expiresAt: c.expires_at, remaining });
+        return json({ ok: true, code: c.code, expiresAt: c.expires_at, remaining, announcement });
       }
       // No active code — was one just consumed by a successful ERP login? (show success)
       const { data: last } = await db.from('otp_codes')
         .select('consumed_at').eq('user_id', user).not('consumed_at', 'is', null)
         .order('consumed_at', { ascending: false }).limit(1).maybeSingle();
       if (last?.consumed_at && (Date.now() - new Date(last.consumed_at).getTime()) < 30000) {
-        return json({ ok: true, consumed: true });
+        return json({ ok: true, consumed: true, announcement });
       }
-      return json({ ok: true, none: true });
+      return json({ ok: true, none: true, announcement });
     }
 
     // approve: app approves the active OTP request after biometric validation
@@ -266,6 +268,24 @@ Deno.serve(async (req) => {
         return json({ ok: true, approved: isApproved, expired: isExpired });
       }
       return json({ ok: true, approved: false, none: true });
+    }
+
+    // ── history: app requests the last 5 successful login approvals ──────────
+    if (action === 'history') {
+      if (!user || !p.key) return json({ ok: false, error: 'user and key required' }, 400);
+      const { data: u } = await db.from('app_users').select('poll_key,status').eq('id', user).maybeSingle();
+      if (!u || u.status !== 'active') return json({ ok: false, error: 'unknown or inactive user' }, 404);
+      if (u.poll_key !== p.key) return json({ ok: false, error: 'bad key' }, 401);
+
+      const { data, error } = await db.from('otp_codes')
+        .select('consumed_at')
+        .eq('user_id', user)
+        .not('consumed_at', 'is', null)
+        .order('consumed_at', { ascending: false })
+        .limit(5);
+
+      if (error) return json({ ok: false, error: error.message }, 500);
+      return json({ ok: true, history: data || [] });
     }
 
     // ── paired: ERP asks whether to require app-OTP for this user ────────────
