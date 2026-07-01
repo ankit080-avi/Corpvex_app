@@ -168,7 +168,7 @@ let pollTimer = null, tickTimer = null;
 function viewHome() {
   stopPolling();
 
-  const codeEl = el('div', { class: 'otp-code', id: 'otp-code' }, '— — —');
+  const codeContainer = el('div', { class: 'otp-code-container', id: 'otp-code-container' });
   const ringFill = el('div', { class: 'ring-fill', id: 'ring-fill' });
   const ring = el('div', { class: 'ring' }, ringFill, el('div', { class: 'ring-num', id: 'ring-num' }, ''));
   const statusEl = el('div', { class: 'otp-status', id: 'otp-status' }, 'Waiting for a login request…');
@@ -191,7 +191,7 @@ function viewHome() {
     bannerEl,
     el('div', { class: 'card otp-card' },
       el('div', { class: 'otp-label' }, 'Your login code'),
-      codeEl,
+      codeContainer,
       ring,
       statusEl,
       copyBtn,
@@ -401,21 +401,26 @@ async function poll() {
 }
 
 function paintOtp() {
-  const codeEl = document.getElementById('otp-code');
+  const container = document.getElementById('otp-code-container');
   const statusEl = document.getElementById('otp-status');
   const copyBtn = document.getElementById('copy-btn');
   const ringNum = document.getElementById('ring-num');
   const ringFill = document.getElementById('ring-fill');
-  if (!codeEl) return;
+  if (!container) return;
 
   const inSuccess = successUntil && Date.now() < successUntil;
 
   if (current) {
     const remaining = Math.max(0, Math.floor((new Date(current.expiresAt).getTime() - Date.now()) / 1000));
     if (remaining <= 0) { current = null; return paintOtp(); }
-    const c = String(current.code);
-    codeEl.textContent = `${c.slice(0, 3)} ${c.slice(3)}`;
-    codeEl.className = 'otp-code live';
+    
+    // Draw 6 individual digit slots
+    const digits = String(current.code).padStart(6, '0').split('');
+    container.className = 'otp-code-container live';
+    container.replaceChildren(
+      ...digits.map(d => el('span', { class: 'otp-digit active' }, d))
+    );
+    
     statusEl.textContent = 'Enter this in the ERP';
     statusEl.className = 'otp-status live';
     copyBtn.disabled = false;
@@ -426,8 +431,10 @@ function paintOtp() {
       ringFill.className = 'ring-fill' + (remaining <= 15 ? ' low' : '');
     }
   } else if (inSuccess) {
-    codeEl.textContent = '✓';
-    codeEl.className = 'otp-code done';
+    container.className = 'otp-code-container done';
+    container.replaceChildren(
+      el('span', { class: 'otp-success-check' }, '✓')
+    );
     statusEl.textContent = 'Login successful';
     statusEl.className = 'otp-status ok';
     copyBtn.disabled = true;
@@ -435,8 +442,10 @@ function paintOtp() {
     if (ringFill) { ringFill.style.setProperty('--pct', '100%'); ringFill.className = 'ring-fill done'; }
   } else {
     if (successUntil) successUntil = 0;
-    codeEl.textContent = '— — —';
-    codeEl.className = 'otp-code';
+    container.className = 'otp-code-container';
+    container.replaceChildren(
+      ...Array(6).fill(null).map(() => el('span', { class: 'otp-digit empty' }, '—'))
+    );
     statusEl.textContent = 'Waiting for a login request…';
     statusEl.className = 'otp-status';
     copyBtn.disabled = true;
